@@ -16,8 +16,11 @@ Arduino_GFX *gfx = new Arduino_ST7789(bus, LCD_RST /* RST */,
                                       0 /* rotation */, true /* IPS */,
                                       LCD_WIDTH, LCD_HEIGHT, 0, 20, 0, 0);
 
-// --- Colores ---
-#define BACKGROUND BLACK
+// --- Colores sobrios ---
+#define BACKGROUND gfx->color565(30, 30, 30)         // Gris oscuro
+#define FONDO_CONECTADO gfx->color565(40, 60, 120)   // Azul sobrio
+#define FONDO_ERROR gfx->color565(120, 40, 40)       // Rojo oscuro
+#define FONDO_ALERTA gfx->color565(40, 120, 40)      // Verde sobrio
 
 // --- WiFi / Cámara ---
 const char *ssid = "ESP32-CAM-Test";
@@ -58,16 +61,76 @@ int jpegDrawCallback(JPEGDRAW *pDraw) {
 void fetchAndShowImage() {
   USBSerial.println("=== Inicio fetchAndShowImage() ===");
 
-  // Primero, disparar una nueva captura
+  // Fondo sobrio para alerta
+  gfx->fillScreen(FONDO_ALERTA);
+  gfx->drawRect(10, 10, 220, 260, YELLOW); // Marco dorado fino
+
+  // Texto profesional y centrado
+  gfx->setTextSize(5);
+  gfx->setTextColor(RED);
+  gfx->setCursor(40, 40);
+  gfx->println("ALERTA!");
+
+  gfx->setTextSize(3);
+  gfx->setTextColor(WHITE);
+  gfx->setCursor(30, 110);
+  gfx->println("MOVIMIENTO");
+
+  gfx->setTextSize(2);
+  gfx->setTextColor(YELLOW);
+  gfx->setCursor(60, 170);
+  gfx->println("DETECTADO");
+
+  // Parpadeo elegante de "ALERTA!"
+  for (int i = 0; i < 2; i++) {
+    gfx->fillRect(40, 40, 160, 50, FONDO_ALERTA);
+    gfx->setTextSize(5);
+    gfx->setTextColor(RED);
+    gfx->setCursor(40, 40);
+    gfx->println("ALERTA!");
+    delay(200);
+    gfx->fillRect(40, 40, 160, 50, FONDO_ALERTA);
+    gfx->setTextSize(5);
+    gfx->setTextColor(YELLOW);
+    gfx->setCursor(40, 40);
+    gfx->println("ALERTA!");
+    delay(200);
+  }
+  delay(700);
+
+  // Disparar captura
   if (!triggerCapture()) {
     USBSerial.println("Fallo al disparar captura");
+    gfx->fillScreen(FONDO_ERROR);
+    gfx->drawRect(10, 60, 220, 80, WHITE);
+    gfx->setTextSize(4);
+    gfx->setTextColor(WHITE);
+    gfx->setCursor(60, 80);
+    gfx->println("ERROR");
+    gfx->setTextSize(2);
+    gfx->setTextColor(YELLOW);
+    gfx->setCursor(40, 120);
+    gfx->println("No se pudo capturar");
+    delay(1500);
+    return;
   } else {
-    delay(3000); // Espera 3 segundos para que la CAM procese
+    delay(3000);
   }
 
   HTTPClient http;
   if (!http.begin(camImageURL)) {
     USBSerial.println("http.begin() falló para imagen");
+    gfx->fillScreen(FONDO_ERROR);
+    gfx->drawRect(10, 60, 220, 80, WHITE);
+    gfx->setTextSize(4);
+    gfx->setTextColor(WHITE);
+    gfx->setCursor(60, 80);
+    gfx->println("ERROR");
+    gfx->setTextSize(2);
+    gfx->setTextColor(YELLOW);
+    gfx->setCursor(40, 120);
+    gfx->println("No se pudo descargar");
+    delay(1500);
     return;
   }
   USBSerial.printf("Solicitando imagen en %s ...\n", camImageURL);
@@ -79,12 +142,23 @@ void fetchAndShowImage() {
     size_t contentLen = http.getSize();
     USBSerial.printf("Content-Length: %u bytes\n", (unsigned)contentLen);
 
-    size_t maxBuf = 200 * 1024; // Aumentado a 200KB
+    size_t maxBuf = 200 * 1024;
     size_t bufSize = (contentLen > 0 && contentLen < maxBuf) ? contentLen : maxBuf;
 
-    uint8_t *buf = (uint8_t *)malloc(bufSize); // Usamos malloc (memoria interna)
+    uint8_t *buf = (uint8_t *)malloc(bufSize);
     if (!buf) {
       USBSerial.println("❌ malloc falló - Verifica memoria disponible");
+      gfx->fillScreen(FONDO_ERROR);
+      gfx->drawRect(10, 60, 220, 80, WHITE);
+      gfx->setTextSize(4);
+      gfx->setTextColor(WHITE);
+      gfx->setCursor(60, 80);
+      gfx->println("ERROR");
+      gfx->setTextSize(2);
+      gfx->setTextColor(YELLOW);
+      gfx->setCursor(40, 120);
+      gfx->println("Memoria insuficiente");
+      delay(1500);
       http.end();
       return;
     }
@@ -98,44 +172,40 @@ void fetchAndShowImage() {
       }
       if (!stream->available()) delay(1);
     }
-    USBSerial.printf("Bytes recibidos: %u\n", (unsigned)idx);
-
-    // Diagnóstico: imprime los primeros 16 bytes recibidos (siempre que haya datos)
-    if (idx > 0) {
-      USBSerial.print("Primeros bytes: ");
-      size_t n = (idx < 16) ? idx : 16;
-      for (size_t i = 0; i < n; i++) {
-        USBSerial.printf("%02X ", buf[i]);
-      }
-      USBSerial.println();
-    }
-
-    // Diagnóstico: imprime los últimos 8 bytes recibidos
-    if (idx > 8) {
-      USBSerial.print("Últimos bytes: ");
-      for (size_t i = idx - 8; i < idx; i++) {
-        USBSerial.printf("%02X ", buf[i]);
-      }
-      USBSerial.println();
-    }
-
-    // Verificación: ¿el archivo termina en FF D9?
-    if (idx >= 2 && buf[idx - 2] == 0xFF && buf[idx - 1] == 0xD9) {
-      USBSerial.println("✅ El archivo JPEG termina correctamente en FF D9");
-    } else {
-      USBSerial.println("❌ El archivo JPEG NO termina en FF D9 (incompleto o corrupto)");
-    }
 
     if (idx > 0) {
-      USBSerial.println("Decodificando con JPEGDEC...");
       jpeg.openRAM(buf, idx, jpegDrawCallback);
-      jpeg.decode(0, 0, 0); // x, y, escala
+
+      int imgWidth = jpeg.getWidth();
+      int imgHeight = jpeg.getHeight();
+
+      int scale = 0;
+      while ((imgWidth >> scale) > LCD_WIDTH || (imgHeight >> scale) > LCD_HEIGHT) {
+        scale++;
+      }
+
+      int scaledWidth = imgWidth >> scale;
+      int scaledHeight = imgHeight >> scale;
+      int x = (LCD_WIDTH - scaledWidth) / 2;
+      int y = (LCD_HEIGHT - scaledHeight) / 2;
+
+      gfx->fillScreen(BACKGROUND); // Fondo gris oscuro para la imagen
+      jpeg.decode(x, y, scale);
       jpeg.close();
-      USBSerial.println("✅ Imagen mostrada con JPEGDEC");
     }
     free(buf);
   } else {
-    USBSerial.printf("❌ HTTP GET error, code=%d\n", httpCode);
+    gfx->fillScreen(FONDO_ERROR);
+    gfx->drawRect(10, 60, 220, 80, WHITE);
+    gfx->setTextSize(4);
+    gfx->setTextColor(WHITE);
+    gfx->setCursor(60, 80);
+    gfx->println("ERROR");
+    gfx->setTextSize(2);
+    gfx->setTextColor(YELLOW);
+    gfx->setCursor(40, 120);
+    gfx->println("No se pudo descargar");
+    delay(1500);
   }
   http.end();
   USBSerial.println("=== Fin fetchAndShowImage() ===");
@@ -171,8 +241,29 @@ void setup() {
   if (WiFi.status() == WL_CONNECTED) {
     USBSerial.printf("\n✅ Conectado, IP: %s\n", WiFi.localIP().toString().c_str());
     USBSerial.printf("RSSI (calidad señal): %d dBm\n", WiFi.RSSI());
+    gfx->fillScreen(FONDO_CONECTADO);
+    gfx->drawRect(10, 60, 220, 80, WHITE);
+    gfx->setTextSize(3);
+    gfx->setTextColor(WHITE);
+    gfx->setCursor(40, 90);
+    gfx->println("Conectado a");
+    gfx->setTextSize(2);
+    gfx->setTextColor(YELLOW);
+    gfx->setCursor(60, 130);
+    gfx->println("ESP32-CAM");
+    delay(1500);
   } else {
-    USBSerial.println("\n❌ No conectado al AP");
+    gfx->fillScreen(FONDO_ERROR);
+    gfx->drawRect(10, 60, 220, 80, WHITE);
+    gfx->setTextSize(3);
+    gfx->setTextColor(WHITE);
+    gfx->setCursor(60, 90);
+    gfx->println("SIN CONEXION");
+    gfx->setTextSize(2);
+    gfx->setTextColor(YELLOW);
+    gfx->setCursor(40, 130);
+    gfx->println("Verifique red WiFi");
+    delay(1500);
   }
 }
 
