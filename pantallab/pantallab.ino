@@ -6,6 +6,7 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <TJpg_Decoder.h>
+#include <JPEGDEC.h>
 
 HWCDC USBSerial;
 
@@ -46,6 +47,14 @@ bool triggerCapture() {
 }
 
 // -------------------- Descargar y mostrar imagen --------------------
+JPEGDEC jpeg; // Declaración global del objeto JPEGDEC
+
+int jpegDrawCallback(JPEGDRAW *pDraw) {
+  // Dibuja cada bloque en la pantalla
+  gfx->draw16bitRGBBitmap(pDraw->x, pDraw->y, (uint16_t*)pDraw->pPixels, pDraw->iWidth, pDraw->iHeight);
+  return 1;
+}
+
 void fetchAndShowImage() {
   USBSerial.println("=== Inicio fetchAndShowImage() ===");
 
@@ -53,7 +62,7 @@ void fetchAndShowImage() {
   if (!triggerCapture()) {
     USBSerial.println("Fallo al disparar captura");
   } else {
-    delay(500); // Espera para que la CAM procese
+    delay(3000); // Espera 3 segundos para que la CAM procese
   }
 
   HTTPClient http;
@@ -70,7 +79,7 @@ void fetchAndShowImage() {
     size_t contentLen = http.getSize();
     USBSerial.printf("Content-Length: %u bytes\n", (unsigned)contentLen);
 
-    size_t maxBuf = 100 * 1024; // Reducido a 100KB para ahorrar memoria
+    size_t maxBuf = 200 * 1024; // Aumentado a 200KB
     size_t bufSize = (contentLen > 0 && contentLen < maxBuf) ? contentLen : maxBuf;
 
     uint8_t *buf = (uint8_t *)malloc(bufSize); // Usamos malloc (memoria interna)
@@ -91,13 +100,38 @@ void fetchAndShowImage() {
     }
     USBSerial.printf("Bytes recibidos: %u\n", (unsigned)idx);
 
+    // Diagnóstico: imprime los primeros 16 bytes recibidos (siempre que haya datos)
     if (idx > 0) {
-      USBSerial.println("Decodificando...");
-      if (TJpgDec.drawJpg(0, 0, buf, idx)) {
-        USBSerial.println("✅ Imagen mostrada");
-      } else {
-        USBSerial.println("❌ Fallo en TJpgDec.drawJpg - Verifica si es JPEG válido");
+      USBSerial.print("Primeros bytes: ");
+      size_t n = (idx < 16) ? idx : 16;
+      for (size_t i = 0; i < n; i++) {
+        USBSerial.printf("%02X ", buf[i]);
       }
+      USBSerial.println();
+    }
+
+    // Diagnóstico: imprime los últimos 8 bytes recibidos
+    if (idx > 8) {
+      USBSerial.print("Últimos bytes: ");
+      for (size_t i = idx - 8; i < idx; i++) {
+        USBSerial.printf("%02X ", buf[i]);
+      }
+      USBSerial.println();
+    }
+
+    // Verificación: ¿el archivo termina en FF D9?
+    if (idx >= 2 && buf[idx - 2] == 0xFF && buf[idx - 1] == 0xD9) {
+      USBSerial.println("✅ El archivo JPEG termina correctamente en FF D9");
+    } else {
+      USBSerial.println("❌ El archivo JPEG NO termina en FF D9 (incompleto o corrupto)");
+    }
+
+    if (idx > 0) {
+      USBSerial.println("Decodificando con JPEGDEC...");
+      jpeg.openRAM(buf, idx, jpegDrawCallback);
+      jpeg.decode(0, 0, 0); // x, y, escala
+      jpeg.close();
+      USBSerial.println("✅ Imagen mostrada con JPEGDEC");
     }
     free(buf);
   } else {
@@ -136,6 +170,7 @@ void setup() {
   }
   if (WiFi.status() == WL_CONNECTED) {
     USBSerial.printf("\n✅ Conectado, IP: %s\n", WiFi.localIP().toString().c_str());
+    USBSerial.printf("RSSI (calidad señal): %d dBm\n", WiFi.RSSI());
   } else {
     USBSerial.println("\n❌ No conectado al AP");
   }
