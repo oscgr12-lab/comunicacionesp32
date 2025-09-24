@@ -26,7 +26,7 @@ const char* ssid     = "ESP32-CAM-Test";
 const char* password = "12345678";
 
 // Configuración
-const int fotoInterval = 30000;  // Intervalo entre fotos (ms)
+const int fotoInterval = 60000;  // Intervalo entre fotos (ms)
 int fotoCounter = 0;
 
 WebServer server(80);
