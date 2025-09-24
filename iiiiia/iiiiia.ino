@@ -1,7 +1,9 @@
 #include "esp_camera.h"
 #include "WiFi.h"
 #include <WebServer.h>
-#include <ArduinoJson.h>  // Instala "ArduinoJson" en Library Manager
+#include <ArduinoJson.h>
+#include "FS.h"
+#include "SD_MMC.h"   // Librería para la microSD (modo 4-bit)
 
 // ==== Pines para módulo AI Thinker ====
 #define PWDN_GPIO_NUM     32
@@ -30,8 +32,13 @@ const int fotoInterval = 30000;  // Intervalo entre fotos (ms)
 int fotoCounter = 0;
 
 WebServer server(80);
-camera_fb_t *currentFb = NULL;  // Buffer global para la foto actual (sin SD)
+camera_fb_t *currentFb = NULL;  
 
+// === SD ===
+String fotosGuardadas[3];  // Mantener solo 3 fotos
+int fotoIndex = 0;
+
+// --- Inicializar cámara ---
 bool initCamera() {
   Serial.println("[LOG] === INICIANDO CÁMARA ===");
   camera_config_t config;
@@ -55,53 +62,63 @@ bool initCamera() {
   config.pin_reset    = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
-  config.frame_size   = FRAMESIZE_QCIF;
-  config.jpeg_quality = 20;
+  config.frame_size   = FRAMESIZE_VGA;
+  config.jpeg_quality = 15;
   config.fb_count     = 1;
 
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
-    Serial.printf("[ERROR] Fallo inicialización cámara: 0x%x (revisa cables/alimentación)\n", err);
+    Serial.printf("[ERROR] Fallo inicialización cámara: 0x%x\n", err);
     return false;
   }
-  Serial.println("[LOG] Cámara OK - Listo para capturar");
   return true;
 }
 
+// --- Guardar en SD ---
+void guardarEnSD(camera_fb_t *fb) {
+  if (!fb) return;
+
+  String filename = "/foto_" + String(millis()) + ".jpg";
+
+  File file = SD_MMC.open(filename, FILE_WRITE);
+  if (!file) {
+    Serial.println("[ERROR] No se pudo abrir archivo en SD");
+    return;
+  }
+  file.write(fb->buf, fb->len);
+  file.close();
+  Serial.printf("[LOG] Foto guardada en SD: %s (%u bytes)\n", filename.c_str(), fb->len);
+
+  fotosGuardadas[fotoIndex] = filename;
+  fotoIndex = (fotoIndex + 1) % 3;
+}
+
+// --- Capturar foto ---
 bool tomarFoto() {
-  Serial.println("[LOG] === CAPTURANDO FOTO ===");
   if (currentFb) {
-    esp_camera_fb_return(currentFb);  // Libera anterior
-    Serial.println("[LOG] Buffer anterior liberado");
+    esp_camera_fb_return(currentFb);
   }
   currentFb = esp_camera_fb_get();
   if (!currentFb) {
-    Serial.println("[ERROR] Fallo al capturar foto (revisa luz/cámara)");
+    Serial.println("[ERROR] Fallo al capturar foto");
     return false;
   }
-  Serial.printf("[LOG] Foto capturada: %u bytes, formato JPEG\n", currentFb->len);
   fotoCounter++;
-  Serial.printf("[LOG] Contador de fotos: %d\n", fotoCounter);
+  guardarEnSD(currentFb);
   return true;
 }
 
+// === Handlers API ===
 void handleImage() {
-  Serial.println("[LOG] === SOLICITUD DE IMAGEN ===");
-  Serial.printf("[LOG] Cliente IP: %s\n", server.client().remoteIP().toString().c_str());
   if (!currentFb) {
-    Serial.println("[ERROR] No hay foto disponible (toma una primero)");
-    server.send(404, "text/plain", "No hay foto - Reinicia para capturar");
+    server.send(404, "text/plain", "No hay foto");
     return;
   }
-  Serial.printf("[LOG] Sirviendo foto de %u bytes\n", currentFb->len);
-  server.setContentLength(currentFb->len);
-  server.send(200, "image/jpeg", "");
-  server.sendContent((const char*)currentFb->buf, currentFb->len);
-  Serial.println("[LOG] Imagen enviada exitosamente");
+  server.sendHeader("Content-Type", "image/jpeg");
+  server.send_P(200, "image/jpeg", (const char*)currentFb->buf, currentFb->len);
 }
 
 void handleTest() {
-  Serial.println("[LOG] === TEST DE CONEXIÓN ===");
   StaticJsonDocument<200> doc;
   doc["status"] = "success";
   doc["uptime"] = millis();
@@ -109,11 +126,9 @@ void handleTest() {
   String response;
   serializeJson(doc, response);
   server.send(200, "application/json", response);
-  Serial.println("[LOG] Test respondido OK");
 }
 
 void handleStatus() {
-  Serial.println("[LOG] === SOLICITUD DE ESTADO ===");
   StaticJsonDocument<300> doc;
   doc["status"] = "success";
   doc["uptime"] = millis();
@@ -122,112 +137,118 @@ void handleStatus() {
   String response;
   serializeJson(doc, response);
   server.send(200, "application/json", response);
-  Serial.println("[LOG] Estado enviado OK");
 }
 
 void handleCapture() {
-  Serial.println("[LOG] === SOLICITUD DE CAPTURA MANUAL ===");
   StaticJsonDocument<200> doc;
   if (tomarFoto()) {
     doc["success"] = true;
     doc["message"] = "Foto tomada";
-    doc["fotos"] = fotoCounter;
   } else {
     doc["success"] = false;
-    doc["message"] = "Fallo al tomar foto";
+    doc["message"] = "Fallo";
   }
   String response;
   serializeJson(doc, response);
   server.send(200, "application/json", response);
-  Serial.println("[LOG] Captura manejada OK");
 }
 
+// === NUEVO DISEÑO INTERFAZ ===
 void handleRoot() {
-  Serial.println("[LOG] === PÁGINA PRINCIPAL ===");
-  unsigned long lastCapture = (millis() - (fotoInterval * (fotoCounter - 1))) / 1000; // Tiempo desde última captura
-  String html = "<html><head><style>";
-  html += "body { background-color: #1a1a1a; color: #ffffff; font-family: Arial, sans-serif; text-align: center; margin: 0; padding: 20px; }";
-  html += "h1 { color: #00ff00; }";
-  html += "img { max-width: 100%; border: 2px solid #00ff00; border-radius: 10px; }";
-  html += "p { font-size: 16px; }";
-  html += "button { background-color: #00ff00; color: #1a1a1a; border: none; padding: 10px 20px; font-size: 16px; cursor: pointer; border-radius: 5px; }";
-  html += "button:hover { background-color: #00cc00; }";
+  String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'><style>";
+  html += "body { background-color: #f0f4f8; color: #333; font-family: Arial, sans-serif; margin:0; padding:0; text-align:center; }";
+  html += "header { background:#2c3e50; color:white; padding:15px; font-size:20px; font-weight:bold; }";
+  html += ".container { padding:20px; }";
+  html += ".gallery { display:flex; justify-content:center; gap:15px; margin-bottom:20px; }";
+  html += ".gallery img { width:120px; height:90px; object-fit:cover; border-radius:10px; box-shadow:0 2px 6px rgba(0,0,0,0.3); border:2px solid #3498db; transition: transform 0.2s; }";
+  html += ".gallery img:hover { transform:scale(1.05); }";
+  html += ".main-photo { margin-top:20px; }";
+  html += ".main-photo img { width:90%; max-width:600px; border-radius:12px; box-shadow:0 4px 12px rgba(0,0,0,0.4); border:3px solid #2980b9; }";
+  html += "button { margin:10px; padding:10px 20px; border:none; border-radius:6px; background:#2980b9; color:white; font-size:16px; cursor:pointer; transition:background 0.3s; }";
+  html += "button:hover { background:#1f5c85; }";
+  html += "footer { margin-top:20px; font-size:12px; color:#666; }";
   html += "</style></head><body>";
-  html += "<h1>ESP32-CAM Test - Foto #" + String(fotoCounter) + "</h1>";
-  if (currentFb) {
-    html += "<img src='/photo' alt='Foto Cámara'>";
-    html += "<p>Última captura: hace " + String(lastCapture) + " segundos</p>";
-  } else {
-    html += "<p>No hay foto aún. Espera...</p>";
+
+  html += "<header>📸 ESP32-CAM Timelapse</header>";
+  html += "<div class='container'>";
+  html += "<h3>Últimas Fotos</h3><div class='gallery'>";
+
+  for (int i = 0; i < 3; i++) {
+    if (fotosGuardadas[i] != "") {
+      html += "<img src='/sd" + String(i) + "'>";
+    }
   }
-  html += "<p><a href='/test' style='color: #00ff00; text-decoration: none;'>Test</a> | <a href='/status' style='color: #00ff00; text-decoration: none;'>Estado</a> | <a href='/photo' style='color: #00ff00; text-decoration: none;'>Foto</a></p>";
-  html += "<button onclick=\"fetch('/capture', { method: 'POST' }).then(response => response.json()).then(data => alert(JSON.stringify(data)));\">Tomar Foto Ahora</button>";
-  html += "</body></html>";
+
+  html += "</div>";
+
+  if (fotosGuardadas[(fotoIndex + 2) % 3] != "") {
+    html += "<div class='main-photo'><img src='/sd" + String((fotoIndex + 2) % 3) + "'></div>";
+  }
+
+  html += "<div><button onclick=\"fetch('/capture',{method:'POST'}).then(r=>r.json()).then(()=>location.reload());\">📷 Tomar Foto</button>";
+  html += "<button onclick='location.reload()'>🔄 Actualizar</button></div>";
+
+  html += "<footer>Fotos tomadas: " + String(fotoCounter) + "</footer>";
+  html += "</div></body></html>";
+
   server.send(200, "text/html", html);
-  Serial.println("[LOG] Página principal servida");
 }
 
+// Endpoint dinámico para fotos de SD
+void handleSDPhoto(int index) {
+  if (fotosGuardadas[index] == "") {
+    server.send(404, "text/plain", "No existe");
+    return;
+  }
+  File file = SD_MMC.open(fotosGuardadas[index]);
+  if (!file) {
+    server.send(500, "text/plain", "Error SD");
+    return;
+  }
+  server.streamFile(file, "image/jpeg");
+  file.close();
+}
+
+// === SETUP ===
 void setup() {
   Serial.begin(115200);
   delay(1000);
-  Serial.println("\n--- Timelapse ESP32-CAM (v2.1.1 - API Consumible) ---");
-  Serial.println("[LOG] Iniciando setup...");
 
-  // Inicializar cámara
-  Serial.println("[LOG] Configurando cámara...");
   if (!initCamera()) {
-    Serial.println("[ERROR] Fallo cámara - Reiniciando en 5s");
     delay(5000);
     esp_restart();
   }
 
-  // Configurar AP WiFi
-  Serial.println("[LOG] Configurando AP WiFi...");
+  if (!SD_MMC.begin("/sdcard", true)) { 
+    Serial.println("[ERROR] No se pudo montar SD");
+  } else {
+    Serial.println("[LOG] SD montada OK");
+  }
+
   WiFi.softAP(ssid, password);
   IPAddress IP = WiFi.softAPIP();
-  Serial.printf("[LOG] AP OK: %s (pass: %s) | IP: %s\n", ssid, password, IP.toString().c_str());
-  Serial.println("[INSTRUCCIÓN] Conéctate al WiFi desde tu celular/PC y usa http://192.168.4.1/ o Postman");
+  Serial.printf("[LOG] AP OK: %s | IP: %s\n", ssid, IP.toString().c_str());
 
-  // Configurar servidor
   server.on("/", handleRoot);
-  server.on("/photo", handleImage);  // Renombrado a /photo para API
+  server.on("/photo", handleImage);
   server.on("/test", handleTest);
   server.on("/status", handleStatus);
   server.on("/capture", HTTP_POST, handleCapture);
-  server.begin();
-  Serial.println("[LOG] Servidor web iniciado - Manejo requests en loop()");
+  server.on("/sd0", []() { handleSDPhoto(0); });
+  server.on("/sd1", []() { handleSDPhoto(1); });
+  server.on("/sd2", []() { handleSDPhoto(2); });
 
-  // Tomar primera foto
-  Serial.println("[LOG] Capturando primera foto...");
-  if (!tomarFoto()) {
-    Serial.println("[ERROR] Fallo primera foto");
-  } else {
-    Serial.println("[LOG] Primera foto lista - Accede al link para verla");
-  }
-  Serial.println("[LOG] Setup completo - Loop iniciado");
+  server.begin();
+
+  tomarFoto(); // Primera foto
 }
 
 void loop() {
-  server.handleClient();  // Prioridad: maneja requests inmediatamente
+  server.handleClient();
 
-  // Captura periódica
   static unsigned long lastPhoto = 0;
   if (millis() - lastPhoto > fotoInterval) {
-    Serial.println("[LOG] Capturando foto periódica...");
-    if (tomarFoto()) {
-      Serial.println("[LOG] Foto periódica OK");
-    } else {
-      Serial.println("[ERROR] Fallo foto periódica");
-    }
+    tomarFoto();
     lastPhoto = millis();
   }
-
-  // Log de estado cada 10s
-  static unsigned long lastStatus = 0;
-  if (millis() - lastStatus > 10000) {
-    Serial.printf("[STATUS] Uptime: %lu ms | Fotos: %d | Clientes conectados: %d\n", millis(), fotoCounter, WiFi.softAPgetStationNum());
-    lastStatus = millis();
-  }
-
-  delay(50);  // Delay mínimo para estabilidad
 }
