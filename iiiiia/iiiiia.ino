@@ -23,19 +23,22 @@
 #define HREF_GPIO_NUM     23
 #define PCLK_GPIO_NUM     22
 
-// ==== Datos WiFi (AP local para prueba) ====
+// ==== Datos WiFi (AP local) ====
 const char* ssid     = "ESP32-CAM-Test";
 const char* password = "12345678";
 
-// Configuración
-const int fotoInterval = 30000;  // Intervalo entre fotos (ms)
-int fotoCounter = 0;
+// ==== Sensor PIR ====
+#define PIR_PIN 13           // Pin donde conectaste el sensor PIR
+bool estadoMovimiento = false;  // Estado actual mostrado en la web
+bool movimientoPrevio = false;  // Para detectar flanco de subida
 
+// ==== Variables de control ====
+int fotoCounter = 0;            // Contador de fotos
 WebServer server(80);
 camera_fb_t *currentFb = NULL;  
 
 // === SD ===
-String fotosGuardadas[3];  // Mantener solo 3 fotos
+String fotosGuardadas[3];       // Mantener solo 3 fotos
 int fotoIndex = 0;
 
 // --- Inicializar cámara ---
@@ -123,6 +126,7 @@ void handleTest() {
   doc["status"] = "success";
   doc["uptime"] = millis();
   doc["fotos"] = fotoCounter;
+  doc["movimiento"] = estadoMovimiento;
   String response;
   serializeJson(doc, response);
   server.send(200, "application/json", response);
@@ -134,6 +138,7 @@ void handleStatus() {
   doc["uptime"] = millis();
   doc["fotos"] = fotoCounter;
   doc["memoria"] = ESP.getFreeHeap();
+  doc["movimiento"] = estadoMovimiento;
   String response;
   serializeJson(doc, response);
   server.send(200, "application/json", response);
@@ -143,7 +148,7 @@ void handleCapture() {
   StaticJsonDocument<200> doc;
   if (tomarFoto()) {
     doc["success"] = true;
-    doc["message"] = "Foto tomada";
+    doc["message"] = "Foto tomada manualmente";
   } else {
     doc["success"] = false;
     doc["message"] = "Fallo";
@@ -153,7 +158,7 @@ void handleCapture() {
   server.send(200, "application/json", response);
 }
 
-// === NUEVO DISEÑO INTERFAZ ===
+// === Interfaz web principal ===
 void handleRoot() {
   String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'><style>";
   html += "body { background-color: #f0f4f8; color: #333; font-family: Arial, sans-serif; margin:0; padding:0; text-align:center; }";
@@ -166,10 +171,13 @@ void handleRoot() {
   html += ".main-photo img { width:90%; max-width:600px; border-radius:12px; box-shadow:0 4px 12px rgba(0,0,0,0.4); border:3px solid #2980b9; }";
   html += "button { margin:10px; padding:10px 20px; border:none; border-radius:6px; background:#2980b9; color:white; font-size:16px; cursor:pointer; transition:background 0.3s; }";
   html += "button:hover { background:#1f5c85; }";
+  html += ".status { margin:15px; padding:10px; font-size:16px; color:#fff; border-radius:6px; }";
+  html += ".motion { background:#e74c3c; }";
+  html += ".no-motion { background:#2ecc71; }";
   html += "footer { margin-top:20px; font-size:12px; color:#666; }";
   html += "</style></head><body>";
 
-  html += "<header>📸 ESP32-CAM Timelapse</header>";
+  html += "<header>📸 ESP32-CAM PIR Timelapse</header>";
   html += "<div class='container'>";
   html += "<h3>Últimas Fotos</h3><div class='gallery'>";
 
@@ -179,13 +187,17 @@ void handleRoot() {
     }
   }
 
-  html += "</div>";
-
+  // Foto principal
   if (fotosGuardadas[(fotoIndex + 2) % 3] != "") {
     html += "<div class='main-photo'><img src='/sd" + String((fotoIndex + 2) % 3) + "'></div>";
   }
 
-  html += "<div><button onclick=\"fetch('/capture',{method:'POST'}).then(r=>r.json()).then(()=>location.reload());\">📷 Tomar Foto</button>";
+  // Estado del sensor PIR
+  html += "<div class='status " + String(estadoMovimiento ? "motion" : "no-motion") + "'>";
+  html += "Estado Sensor PIR: " + String(estadoMovimiento ? "💥 Movimiento Detectado" : "✅ Sin Movimiento");
+  html += "</div>";
+
+  html += "<div><button onclick=\"fetch('/capture',{method:'POST'}).then(r=>r.json()).then(()=>location.reload());\">📷 Tomar Foto Manual</button>";
   html += "<button onclick='location.reload()'>🔄 Actualizar</button></div>";
 
   html += "<footer>Fotos tomadas: " + String(fotoCounter) + "</footer>";
@@ -214,21 +226,25 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
 
+  // Inicialización cámara
   if (!initCamera()) {
     delay(5000);
     esp_restart();
   }
 
+  // Inicialización SD
   if (!SD_MMC.begin("/sdcard", true)) { 
     Serial.println("[ERROR] No se pudo montar SD");
   } else {
     Serial.println("[LOG] SD montada OK");
   }
 
+  // Configuración AP WiFi
   WiFi.softAP(ssid, password);
   IPAddress IP = WiFi.softAPIP();
   Serial.printf("[LOG] AP OK: %s | IP: %s\n", ssid, IP.toString().c_str());
 
+  // Configurar servidor
   server.on("/", handleRoot);
   server.on("/photo", handleImage);
   server.on("/test", handleTest);
@@ -240,15 +256,30 @@ void setup() {
 
   server.begin();
 
-  tomarFoto(); // Primera foto
+  // Configurar pin PIR
+  pinMode(PIR_PIN, INPUT);
+
+  // Foto inicial
+  tomarFoto(); 
 }
 
+// === LOOP ===
 void loop() {
   server.handleClient();
 
-  static unsigned long lastPhoto = 0;
-  if (millis() - lastPhoto > fotoInterval) {
+  // Leer estado actual del PIR
+  bool pirActual = digitalRead(PIR_PIN);
+
+  // Tomar foto solo en flanco de subida (LOW -> HIGH)
+  if (pirActual && !movimientoPrevio) {
+    Serial.println("[LOG] Movimiento detectado, tomando foto...");
     tomarFoto();
-    lastPhoto = millis();
+    estadoMovimiento = true;
+  } 
+  else if (!pirActual) {
+    estadoMovimiento = false;
   }
+
+  // Guardar estado previo para detectar próximo flanco
+  movimientoPrevio = pirActual;
 }
