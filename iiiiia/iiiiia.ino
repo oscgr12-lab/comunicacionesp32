@@ -28,17 +28,17 @@ const char* ssid     = "ESP32-CAM-Test";
 const char* password = "12345678";
 
 // ==== Sensor PIR ====
-#define PIR_PIN 13           // Pin donde conectaste el sensor PIR
-bool estadoMovimiento = false;  // Estado actual mostrado en la web
-bool movimientoPrevio = false;  // Para detectar flanco de subida
+#define PIR_PIN 12
+bool estadoMovimiento = false;  
+bool movimientoPrevio = false;  
 
 // ==== Variables de control ====
-int fotoCounter = 0;            // Contador de fotos
+int fotoCounter = 0;            
 WebServer server(80);
 camera_fb_t *currentFb = NULL;  
 
 // === SD ===
-String fotosGuardadas[3];       // Mantener solo 3 fotos
+String fotosGuardadas[3];       
 int fotoIndex = 0;
 
 // --- Inicializar cámara ---
@@ -97,10 +97,8 @@ void guardarEnSD(camera_fb_t *fb) {
 }
 
 // --- Capturar foto ---
-bool tomarFoto() {
-  if (currentFb) {
-    esp_camera_fb_return(currentFb);
-  }
+bool tomarFoto(const char* motivo = "desconocido") {
+  if (currentFb) esp_camera_fb_return(currentFb);
   currentFb = esp_camera_fb_get();
   if (!currentFb) {
     Serial.println("[ERROR] Fallo al capturar foto");
@@ -108,13 +106,14 @@ bool tomarFoto() {
   }
   fotoCounter++;
   guardarEnSD(currentFb);
+  Serial.printf("[LOG] Foto tomada por: %s\n", motivo);
   return true;
 }
 
 // === Handlers API ===
 void handleImage() {
-  if (!currentFb) {
-    server.send(404, "text/plain", "No hay foto");
+  if (!estadoMovimiento || !currentFb) {
+    server.send(404, "text/plain", "No se ha detectado un movimiento");
     return;
   }
   server.sendHeader("Content-Type", "image/jpeg");
@@ -144,20 +143,6 @@ void handleStatus() {
   server.send(200, "application/json", response);
 }
 
-void handleCapture() {
-  StaticJsonDocument<200> doc;
-  if (tomarFoto()) {
-    doc["success"] = true;
-    doc["message"] = "Foto tomada manualmente";
-  } else {
-    doc["success"] = false;
-    doc["message"] = "Fallo";
-  }
-  String response;
-  serializeJson(doc, response);
-  server.send(200, "application/json", response);
-}
-
 // === Interfaz web principal ===
 void handleRoot() {
   String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'><style>";
@@ -179,26 +164,31 @@ void handleRoot() {
 
   html += "<header>📸 ESP32-CAM PIR Timelapse</header>";
   html += "<div class='container'>";
-  html += "<h3>Últimas Fotos</h3><div class='gallery'>";
+  html += "<h3>Últimas Fotos por Movimiento</h3><div class='gallery'>";
 
+  bool hayFotos = false;
   for (int i = 0; i < 3; i++) {
     if (fotosGuardadas[i] != "") {
       html += "<img src='/sd" + String(i) + "'>";
+      hayFotos = true;
     }
   }
 
-  // Foto principal
-  if (fotosGuardadas[(fotoIndex + 2) % 3] != "") {
+  if (!hayFotos) {
+    html += "<p style='color:#888;font-size:18px;'>No hay movimiento detectado.</p>";
+  }
+
+  html += "</div>";
+
+  if (hayFotos && fotosGuardadas[(fotoIndex + 2) % 3] != "") {
     html += "<div class='main-photo'><img src='/sd" + String((fotoIndex + 2) % 3) + "'></div>";
   }
 
-  // Estado del sensor PIR
   html += "<div class='status " + String(estadoMovimiento ? "motion" : "no-motion") + "'>";
   html += "Estado Sensor PIR: " + String(estadoMovimiento ? "💥 Movimiento Detectado" : "✅ Sin Movimiento");
   html += "</div>";
 
-  html += "<div><button onclick=\"fetch('/capture',{method:'POST'}).then(r=>r.json()).then(()=>location.reload());\">📷 Tomar Foto Manual</button>";
-  html += "<button onclick='location.reload()'>🔄 Actualizar</button></div>";
+  html += "<div><button onclick='location.reload()'>🔄 Actualizar</button></div>";
 
   html += "<footer>Fotos tomadas: " + String(fotoCounter) + "</footer>";
   html += "</div></body></html>";
@@ -209,7 +199,7 @@ void handleRoot() {
 // Endpoint dinámico para fotos de SD
 void handleSDPhoto(int index) {
   if (fotosGuardadas[index] == "") {
-    server.send(404, "text/plain", "No existe");
+    server.send(404, "text/plain", "No se ha detectado un movimiento");
     return;
   }
   File file = SD_MMC.open(fotosGuardadas[index]);
@@ -226,60 +216,70 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
 
-  // Inicialización cámara
   if (!initCamera()) {
     delay(5000);
     esp_restart();
   }
 
-  // Inicialización SD
   if (!SD_MMC.begin("/sdcard", true)) { 
     Serial.println("[ERROR] No se pudo montar SD");
   } else {
     Serial.println("[LOG] SD montada OK");
   }
 
-  // Configuración AP WiFi
   WiFi.softAP(ssid, password);
   IPAddress IP = WiFi.softAPIP();
   Serial.printf("[LOG] AP OK: %s | IP: %s\n", ssid, IP.toString().c_str());
 
-  // Configurar servidor
   server.on("/", handleRoot);
   server.on("/photo", handleImage);
   server.on("/test", handleTest);
   server.on("/status", handleStatus);
-  server.on("/capture", HTTP_POST, handleCapture);
   server.on("/sd0", []() { handleSDPhoto(0); });
   server.on("/sd1", []() { handleSDPhoto(1); });
   server.on("/sd2", []() { handleSDPhoto(2); });
 
   server.begin();
 
-  // Configurar pin PIR
   pinMode(PIR_PIN, INPUT);
-
-  // Foto inicial
-  tomarFoto(); 
 }
 
 // === LOOP ===
+unsigned long ultimoMovimientoMs = 0;
+const unsigned long esperaEntreFotosMs = 5000; 
+
 void loop() {
   server.handleClient();
 
-  // Leer estado actual del PIR
   bool pirActual = digitalRead(PIR_PIN);
 
-  // Tomar foto solo en flanco de subida (LOW -> HIGH)
+  static int sinMovimientoCount = 0;
+  static int sinSensorCount = 0;
+
   if (pirActual && !movimientoPrevio) {
     Serial.println("[LOG] Movimiento detectado, tomando foto...");
-    tomarFoto();
+    tomarFoto("PIR");
     estadoMovimiento = true;
-  } 
-  else if (!pirActual) {
+    sinMovimientoCount = 0;
+    sinSensorCount = 0;
+  } else if (!pirActual) {
     estadoMovimiento = false;
+    sinMovimientoCount++;
+    if (sinMovimientoCount == 1000) {
+      Serial.println("[INFO] No se detecta movimiento PIR.");
+      sinMovimientoCount = 0;
+    }
   }
 
-  // Guardar estado previo para detectar próximo flanco
+  if (pirActual == movimientoPrevio) {
+    sinSensorCount++;
+    if (sinSensorCount == 5000) {
+      Serial.println("[ADVERTENCIA] El sensor PIR podría no estar conectado o está fallando.");
+      sinSensorCount = 0;
+    }
+  } else {
+    sinSensorCount = 0;
+  }
+
   movimientoPrevio = pirActual;
 }
