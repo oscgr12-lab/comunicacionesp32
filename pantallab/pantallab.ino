@@ -7,6 +7,7 @@
 #include <HTTPClient.h>
 #include <TJpg_Decoder.h>
 #include <JPEGDEC.h>
+#include <ArduinoJson.h>  // Agregado para parse JSON en checkMovimiento
 
 HWCDC USBSerial;
 
@@ -32,8 +33,9 @@ Arduino_GFX *gfx = new Arduino_ST7789(bus, LCD_RST /* RST */,
 // --- WiFi / Cámara ---
 const char *ssid = "ESP32-CAM-Test";
 const char *password = "12345678";
-const char *camTriggerURL = "http://192.168.4.1/capture";
 const char *camImageURL = "http://192.168.4.1/photo";
+const char *camStatusURL = "http://192.168.4.1/status";  // Nueva URL para chequear movimiento
+bool ultimoMovimiento = false;  // Para evitar spam de alertas
 
 // -------------------- Funciones de visualización premium --------------------
 void dibujarPanelModerno(int x, int y, int ancho, int alto, uint16_t colorFondo, uint16_t colorAcento, bool sombra = true) {
@@ -200,21 +202,43 @@ bool jpgDrawToGfx(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t *bitmap
   return true;
 }
 
-// -------------------- Disparar captura en la CAM --------------------
-bool triggerCapture() {
+// -------------------- Chequear estado PIR via /status (nuevo, método GET) ---
+bool checkMovimiento() {
+  mostrarPantallaProcesando();
+  mostrarTextoCentrado("CONSULTANDO SENSOR", 110, 2, TEXTO_SECUNDARIO);
+  delay(500);
+
   HTTPClient http;
-  if (!http.begin(camTriggerURL)) {
-    USBSerial.println("http.begin() falló para trigger");
+  if (!http.begin(camStatusURL)) {
+    USBSerial.println("http.begin() falló para status");
     return false;
   }
-  USBSerial.printf("Disparando captura en %s ...\n", camTriggerURL);
-  int httpCode = http.POST("");
-  USBSerial.printf("HTTP code (trigger): %d\n", httpCode);
+
+  int httpCode = http.GET();
+  USBSerial.printf("HTTP code (status): %d\n", httpCode);
+
+  if (httpCode == HTTP_CODE_OK) {
+    String payload = http.getString();
+    USBSerial.printf("Payload status: %s\n", payload.c_str());
+
+    StaticJsonDocument<300> doc;
+    DeserializationError error = deserializeJson(doc, payload);
+    if (!error) {
+      bool movimiento = doc["movimiento"];
+      USBSerial.printf("Movimiento detectado: %s\n", movimiento ? "SI" : "NO");
+      http.end();
+      return movimiento;
+    } else {
+      USBSerial.printf("JSON parse error: %s\n", error.c_str());
+    }
+  } else {
+    USBSerial.printf("Error GET status: %d\n", httpCode);
+  }
   http.end();
-  return (httpCode == HTTP_CODE_OK);
+  return false;  // Asume no movimiento si error
 }
 
-// -------------------- Descargar y mostrar imagen --------------------
+// -------------------- Descargar y mostrar imagen (modificado: sin trigger) --------------------
 JPEGDEC jpeg;
 
 int jpegDrawCallback(JPEGDRAW *pDraw) {
@@ -223,24 +247,8 @@ int jpegDrawCallback(JPEGDRAW *pDraw) {
 }
 
 void fetchAndShowImage() {
-  USBSerial.println("=== Inicio fetchAndShowImage() ===");
+  USBSerial.println("=== Descargando imagen por movimiento ===");
 
-  // Pantalla de alerta premium
-  efectoAlertaModerno();
-  delay(1000);
-
-  // Disparar captura
-  mostrarPantallaProcesando();
-  mostrarBarraProgreso(10, "INICIANDO CAPTURA");
-
-  if (!triggerCapture()) {
-    USBSerial.println("Fallo al disparar captura");
-    mostrarPantallaError("Fallo en captura");
-    delay(2000);
-    return;
-  }
-
-  delay(1000);
   mostrarBarraProgreso(40, "PROCESANDO IMAGEN");
 
   HTTPClient http;
@@ -325,6 +333,16 @@ void fetchAndShowImage() {
   USBSerial.println("=== Fin fetchAndShowImage() ===");
 }
 
+// Nueva función para sin movimiento
+void mostrarPantallaEsperaSinMovimiento() {
+  gfx->fillScreen(BACKGROUND);
+  dibujarPanelModerno(30, 80, 180, 80, FONDO_CONECTADO, ACENTO_CONEXION);
+  mostrarTextoCentrado("SIN MOVIMIENTO", 100, 2, TEXTO_SECUNDARIO);
+  mostrarTextoCentrado("Sensor PIR inactivo", 130, 1, TEXTO_SECUNDARIO);
+  dibujarIconoConexion(120, 170, 40, gfx->color565(100, 100, 100));  // Icono gris para inactivo
+  mostrarTextoCentrado("Esperando detección...", 220, 1, TEXTO_SECUNDARIO);
+}
+
 // -------------------- setup / loop --------------------
 void setup() {
   USBSerial.begin(115200);
@@ -384,15 +402,26 @@ void setup() {
   delay(2000);
 }
 
-unsigned long lastFetchMs = 0;
-const unsigned long fetchIntervalMs = 10000;
+unsigned long lastCheckMs = 0;
+const unsigned long checkIntervalMs = 3000;  // Chequea cada 3s
 
 void loop() {
   if (WiFi.status() == WL_CONNECTED) {
-    if ((millis() - lastFetchMs) >= fetchIntervalMs) {
-      USBSerial.println("\n>>> Capturando imagen de la CAM...");
-      lastFetchMs = millis();
-      fetchAndShowImage();
+    if ((millis() - lastCheckMs) >= checkIntervalMs) {
+      USBSerial.println("\n>>> Chequeando movimiento en CAM...");
+      lastCheckMs = millis();
+      bool hayMovimiento = checkMovimiento();
+
+      if (hayMovimiento && !ultimoMovimiento) {  // Solo alerta si es nuevo
+        USBSerial.println(">>> ¡MOVIMIENTO! Mostrando foto...");
+        ultimoMovimiento = true;
+        efectoAlertaModerno();  // Efecto solo aquí
+        delay(1000);
+        fetchAndShowImage();  // Descarga y muestra foto
+      } else if (!hayMovimiento) {
+        ultimoMovimiento = false;
+        mostrarPantallaEsperaSinMovimiento();  // Muestra sin movimiento
+      }
     }
   } else {
     mostrarPantallaEspera();
