@@ -1,25 +1,34 @@
-#include <Arduino.h>
-#include "Arduino_GFX_Library.h"
-#include "pin_config.h"
-#include <Wire.h>
-#include "HWCDC.h"
-#include <WiFi.h>
-#include <HTTPClient.h>
-#include <TJpg_Decoder.h>
-#include <JPEGDEC.h>
-#include <ArduinoJson.h>  // Agregado para parse JSON en checkMovimiento
+// ======================= INCLUDES Y LIBRERÍAS =======================
+// Librerías estándar y de hardware necesarias para el funcionamiento del ESP32 y la pantalla
+#include <Arduino.h>                // Funciones básicas de Arduino
+#include "Arduino_GFX_Library.h"    // Librería para manejo de pantallas gráficas
+#include "pin_config.h"             // Definición de pines personalizados
+#include <Wire.h>                   // Comunicación I2C (no usada aquí, pero común en pantallas)
+#include "HWCDC.h"                  // Comunicación USB Serial
+#include <WiFi.h>                   // Conexión WiFi
+#include <HTTPClient.h>             // Cliente HTTP para peticiones a la cámara
+#include <TJpg_Decoder.h>           // Decodificador JPEG para imágenes
+#include <JPEGDEC.h>                // Decodificador JPEG alternativo
+#include <ArduinoJson.h>            // Parseo de JSON para respuestas de la cámara
 
-HWCDC USBSerial;
+// ======================= OBJETO SERIAL USB ==========================
+HWCDC USBSerial; // Comunicación serial por USB para debug
 
-// --- DISPLAY / GFX ---
+// ======================= CONFIGURACIÓN DE DISPLAY ===================
+// Dimensiones de la pantalla LCD
 #define LCD_WIDTH 240
 #define LCD_HEIGHT 280
-Arduino_DataBus *bus = new Arduino_ESP32SPI(LCD_DC, LCD_CS, LCD_SCK, LCD_MOSI);
-Arduino_GFX *gfx = new Arduino_ST7789(bus, LCD_RST /* RST */,
-                                      0 /* rotation */, true /* IPS */,
-                                      LCD_WIDTH, LCD_HEIGHT, 0, 20, 0, 0);
 
-// --- Paleta de colores premium ---
+// Configuración del bus SPI para la pantalla
+Arduino_DataBus *bus = new Arduino_ESP32SPI(LCD_DC, LCD_CS, LCD_SCK, LCD_MOSI);
+
+// Inicialización del objeto de pantalla (ST7789)
+Arduino_GFX *gfx = new Arduino_ST7789(
+    bus, LCD_RST, 0, true, LCD_WIDTH, LCD_HEIGHT, 0, 20, 0, 0
+);
+
+// ======================= PALETA DE COLORES =========================
+// Definición de colores personalizados para la interfaz gráfica
 #define BACKGROUND gfx->color565(20, 25, 35)
 #define FONDO_CONECTADO gfx->color565(30, 60, 90)
 #define FONDO_ERROR gfx->color565(120, 50, 60)
@@ -30,14 +39,35 @@ Arduino_GFX *gfx = new Arduino_ST7789(bus, LCD_RST /* RST */,
 #define ACENTO_CONEXION gfx->color565(50, 200, 255)
 #define BORDE_SUAVE gfx->color565(60, 70, 90)
 
-// --- WiFi / Cámara ---
-const char *ssid = "ESP32-CAM-Test";
-const char *password = "12345678";
-const char *camImageURL = "http://192.168.4.1/photo";
-const char *camStatusURL = "http://192.168.4.1/status";  // Nueva URL para chequear movimiento
-bool ultimoMovimiento = false;  // Para evitar spam de alertas
+// ======================= CONFIGURACIÓN WIFI Y CÁMARA ===============
+// Credenciales WiFi y URLs de la cámara ESP32-CAM
+const char *ssid = "ESP32-CAM-Test";              // SSID del AP de la cámara
+const char *password = "12345678";                // Contraseña del AP
+const char *camImageURL = "http://192.168.4.1/photo";   // URL para obtener la foto
+const char *camStatusURL = "http://192.168.4.1/status"; // URL para obtener el estado
 
-// -------------------- Funciones de visualización premium --------------------
+bool ultimoMovimiento = false; // Flag para evitar alertas repetidas
+
+// ======================= CONTROL DE FOTOS ==========================
+// Lleva el control del último contador de fotos recibido
+int ultimoFotoCounter = -1;
+
+// Estructura para almacenar el estado de movimiento y el contador de fotos
+struct MovimientoStatus {
+  bool movimiento; // Indica si hay movimiento detectado
+  int fotos;       // Contador de fotos tomadas por la cámara
+};
+
+// ======================= FUNCIONES DE INTERFAZ =====================
+// ...Aquí documenta cada función con un comentario breve arriba...
+/**
+ * Dibuja un panel moderno con bordes redondeados y sombra.
+ * @param x, y: posición
+ * @param ancho, alto: dimensiones
+ * @param colorFondo: color de fondo
+ * @param colorAcento: color del borde/acento
+ * @param sombra: si se dibuja sombra o no
+ */
 void dibujarPanelModerno(int x, int y, int ancho, int alto, uint16_t colorFondo, uint16_t colorAcento, bool sombra = true) {
   if (sombra) {
     gfx->fillRoundRect(x + 2, y + 2, ancho, alto, 12, gfx->color565(10, 15, 25));
@@ -203,15 +233,16 @@ bool jpgDrawToGfx(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t *bitmap
 }
 
 // -------------------- Chequear estado PIR via /status (nuevo, método GET) ---
-bool checkMovimiento() {
+MovimientoStatus checkMovimiento() {
   mostrarPantallaProcesando();
   mostrarTextoCentrado("CONSULTANDO SENSOR", 110, 2, TEXTO_SECUNDARIO);
-  delay(500);
+  delay(5000);
 
   HTTPClient http;
+  MovimientoStatus status = {false, ultimoFotoCounter};
   if (!http.begin(camStatusURL)) {
     USBSerial.println("http.begin() falló para status");
-    return false;
+    return status;
   }
 
   int httpCode = http.GET();
@@ -224,10 +255,9 @@ bool checkMovimiento() {
     StaticJsonDocument<300> doc;
     DeserializationError error = deserializeJson(doc, payload);
     if (!error) {
-      bool movimiento = doc["movimiento"];
-      USBSerial.printf("Movimiento detectado: %s\n", movimiento ? "SI" : "NO");
-      http.end();
-      return movimiento;
+      status.movimiento = doc["movimiento"];
+      status.fotos = doc["fotos"];
+      USBSerial.printf("Movimiento detectado: %s | Fotos: %d\n", status.movimiento ? "SI" : "NO", status.fotos);
     } else {
       USBSerial.printf("JSON parse error: %s\n", error.c_str());
     }
@@ -235,7 +265,7 @@ bool checkMovimiento() {
     USBSerial.printf("Error GET status: %d\n", httpCode);
   }
   http.end();
-  return false;  // Asume no movimiento si error
+  return status;
 }
 
 // -------------------- Descargar y mostrar imagen (modificado: sin trigger) --------------------
@@ -255,7 +285,7 @@ void fetchAndShowImage() {
   if (!http.begin(camImageURL)) {
     USBSerial.println("http.begin() falló para imagen");
     mostrarPantallaError("Error de conexión");
-    delay(2000);
+    delay(5000);
     return;
   }
 
@@ -277,7 +307,7 @@ void fetchAndShowImage() {
     if (!buf) {
       USBSerial.println("❌ malloc falló - Verifica memoria disponible");
       mostrarPantallaError("Memoria insuficiente");
-      delay(2000);
+      delay(5000);
       http.end();
       return;
     }
@@ -298,24 +328,31 @@ void fetchAndShowImage() {
       mostrarBarraProgreso(100, "COMPLETADO");
       delay(500);
 
+      // --- Decodifica para obtener dimensiones ---
       jpeg.openRAM(buf, idx, jpegDrawCallback);
-
       int imgWidth = jpeg.getWidth();
       int imgHeight = jpeg.getHeight();
+      jpeg.close();
 
+      // --- Escalado automático para que la imagen quepa en la pantalla ---
       int scale = 0;
       while ((imgWidth >> scale) > LCD_WIDTH || (imgHeight >> scale) > LCD_HEIGHT) {
         scale++;
       }
-
       int scaledWidth = imgWidth >> scale;
       int scaledHeight = imgHeight >> scale;
+
+      // Centrado en pantalla
       int x = (LCD_WIDTH - scaledWidth) / 2;
       int y = (LCD_HEIGHT - scaledHeight) / 2;
+      if (x < 0) x = 0;
+      if (y < 0) y = 0;
 
+      // --- Dibuja la imagen centrada y ajustada ---
       gfx->fillScreen(BACKGROUND);
       dibujarPanelModerno(x-8, y-8, scaledWidth+16, scaledHeight+16, BORDE_SUAVE, ACENTO_CONEXION);
-      jpeg.decode(x, y, scale);
+      jpeg.openRAM(buf, idx, jpegDrawCallback);
+      jpeg.decode(x, y, scale); // Aplica el escalado calculado
       jpeg.close();
 
       mostrarTextoCentrado("CAPTURA COMPLETADA", 270, 1, TEXTO_SECUNDARIO);
@@ -327,10 +364,13 @@ void fetchAndShowImage() {
     free(buf);
   } else {
     mostrarPantallaError("Descarga fallida");
-    delay(2000);
+    delay(5000);
   }
   http.end();
   USBSerial.println("=== Fin fetchAndShowImage() ===");
+
+  // --- Espera para que la foto se vea al menos 10 segundos ---
+  delay(10000);
 }
 
 // Nueva función para sin movimiento
@@ -343,27 +383,30 @@ void mostrarPantallaEsperaSinMovimiento() {
   mostrarTextoCentrado("Esperando detección...", 220, 1, TEXTO_SECUNDARIO);
 }
 
-// -------------------- setup / loop --------------------
+// ======================= SETUP =======================
+/**
+ * Inicializa la pantalla, WiFi y muestra la pantalla de inicio.
+ */
 void setup() {
-  USBSerial.begin(115200);
+  USBSerial.begin(115200); // Inicia comunicación serial para debug
   USBSerial.println("ESP32-S3 + Arduino_GFX + Cámara - Sistema Premium");
 
-  // Init Display
+  // Inicializa la pantalla
   if (!gfx->begin()) {
     USBSerial.println("gfx->begin() falló!");
   }
   gfx->fillScreen(BACKGROUND);
   gfx->setTextWrap(false);
 
-  pinMode(LCD_BL, OUTPUT);
-  digitalWrite(LCD_BL, HIGH);
+  pinMode(LCD_BL, OUTPUT);      // Pin de retroiluminación
+  digitalWrite(LCD_BL, HIGH);   // Enciende la retroiluminación
 
-  // Config TJpg_Decoder
+  // Configura el decodificador JPEG
   TJpgDec.setJpgScale(1);
   TJpgDec.setCallback(jpgDrawToGfx);
   TJpgDec.setSwapBytes(true);
 
-  // Pantalla de inicio premium
+  // Pantalla de inicio
   gfx->fillScreen(BACKGROUND);
   mostrarTextoCentrado("SISTEMA DE SEGURIDAD", 80, 2, ACENTO_CONEXION);
   mostrarTextoCentrado("ESP32-CAM PRO", 110, 2, TEXTO_PRINCIPAL);
@@ -402,34 +445,57 @@ void setup() {
   delay(2000);
 }
 
+/**
+ * Variable global para almacenar el tiempo del último chequeo de movimiento.
+ */
 unsigned long lastCheckMs = 0;
+
+/**
+ * Intervalo de tiempo (en milisegundos) entre chequeos de movimiento.
+ */
 const unsigned long checkIntervalMs = 3000;  // Chequea cada 3s
 
+// ======================= LOOP PRINCIPAL =======================
+/**
+ * Bucle principal del programa.
+ * - Si hay WiFi, consulta el estado de la cámara cada 3 segundos.
+ * - Si detecta movimiento y una nueva foto, muestra alerta y la imagen.
+ * - Si no hay movimiento, muestra pantalla de espera.
+ * - Si no hay WiFi, intenta reconectar y muestra pantalla de espera.
+ */
 void loop() {
-  if (WiFi.status() == WL_CONNECTED) {
-    if ((millis() - lastCheckMs) >= checkIntervalMs) {
+  if (WiFi.status() == WL_CONNECTED) { // Si está conectado al WiFi
+    if ((millis() - lastCheckMs) >= checkIntervalMs) { // Si pasó el intervalo
       USBSerial.println("\n>>> Chequeando movimiento en CAM...");
-      lastCheckMs = millis();
-      bool hayMovimiento = checkMovimiento();
+      lastCheckMs = millis(); // Actualiza el tiempo del último chequeo
+      MovimientoStatus status = checkMovimiento(); // Consulta el estado de la cámara
 
-      if (hayMovimiento && !ultimoMovimiento) {  // Solo alerta si es nuevo
-        USBSerial.println(">>> ¡MOVIMIENTO! Mostrando foto...");
+      // Si hay movimiento y una nueva foto (contador de fotos cambió)
+      if (status.movimiento && status.fotos != ultimoFotoCounter) {
+        USBSerial.println(">>> ¡MOVIMIENTO NUEVO! Mostrando foto...");
         ultimoMovimiento = true;
-        efectoAlertaModerno();  // Efecto solo aquí
-        delay(1000);
-        fetchAndShowImage();  // Descarga y muestra foto
-      } else if (!hayMovimiento) {
+        ultimoFotoCounter = status.fotos; // Actualiza el contador de fotos
+        efectoAlertaModerno();            // Muestra animación de alerta
+        delay(1000);                      // Espera breve
+        fetchAndShowImage();              // Descarga y muestra la imagen
+      } else if (!status.movimiento) {
+        // Si no hay movimiento, muestra pantalla de espera
         ultimoMovimiento = false;
-        mostrarPantallaEsperaSinMovimiento();  // Muestra sin movimiento
+        mostrarPantallaEsperaSinMovimiento();
       }
     }
   } else {
+    // Si no hay WiFi, muestra pantalla de espera y reintenta conexión
     mostrarPantallaEspera();
-    delay(1000); // Espera antes de volver a checar conexión
-    WiFi.reconnect(); // Intenta reconectar
+    delay(1000);
+    WiFi.reconnect();
   }
 }
 
+/**
+ * Muestra una pantalla de espera cuando no hay conexión WiFi.
+ * Dibuja un panel y un icono de conexión.
+ */
 void mostrarPantallaEspera() {
   gfx->fillScreen(BACKGROUND);
   dibujarPanelModerno(30, 80, 180, 80, FONDO_CONECTADO, ACENTO_CONEXION);
