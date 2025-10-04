@@ -66,7 +66,7 @@ bool initCamera() {
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
   config.frame_size   = FRAMESIZE_VGA;
-  config.jpeg_quality = 15;
+  config.jpeg_quality = 12;  // Bajado a 12 para imágenes más livianas y rápidas
   config.fb_count     = 1;
 
   esp_err_t err = esp_camera_init(&config);
@@ -98,7 +98,10 @@ void guardarEnSD(camera_fb_t *fb) {
 
 // --- Capturar foto ---
 bool tomarFoto(const char* motivo = "desconocido") {
-  if (currentFb) esp_camera_fb_return(currentFb);
+  if (currentFb) {
+    esp_camera_fb_return(currentFb);  // Liberar fb anterior si existe
+    currentFb = NULL;
+  }
   currentFb = esp_camera_fb_get();
   if (!currentFb) {
     Serial.println("[ERROR] Fallo al capturar foto");
@@ -106,18 +109,21 @@ bool tomarFoto(const char* motivo = "desconocido") {
   }
   fotoCounter++;
   guardarEnSD(currentFb);
-  Serial.printf("[LOG] Foto tomada por: %s\n", motivo);
+  Serial.printf("[LOG] Foto tomada por: %s (fb len: %u)\n", motivo, currentFb->len);  // Log extra para debug
   return true;
 }
 
 // === Handlers API ===
 void handleImage() {
-  if (!estadoMovimiento || !currentFb) {
+  Serial.printf("[LOG] /photo solicitado - currentFb: %s, len: %u\n", currentFb ? "OK" : "NULL", currentFb ? currentFb->len : 0);  // Log para debug
+  if (!currentFb) {
+    Serial.println("[LOG] /photo denegado: sin fb disponible");
     server.send(404, "text/plain", "No se ha detectado un movimiento");
     return;
   }
   server.sendHeader("Content-Type", "image/jpeg");
   server.send_P(200, "image/jpeg", (const char*)currentFb->buf, currentFb->len);
+  Serial.println("[LOG] /photo enviado OK");
 }
 
 void handleTest() {
@@ -141,6 +147,7 @@ void handleStatus() {
   String response;
   serializeJson(doc, response);
   server.send(200, "application/json", response);
+  Serial.printf("[LOG] /status enviado: movimiento=%s\n", estadoMovimiento ? "true" : "false");  // Log para debug
 }
 
 // === Interfaz web principal ===
@@ -242,11 +249,13 @@ void setup() {
   server.begin();
 
   pinMode(PIR_PIN, INPUT);
+  Serial.println("[LOG] Setup completado - Esperando PIR en pin 12");
 }
 
 // === LOOP ===
 unsigned long ultimoMovimientoMs = 0;
 const unsigned long esperaEntreFotosMs = 5000; 
+const unsigned long timeoutMovimientoMs = 15000;  // Aumentado a 15s para dar más tiempo al fetch
 
 void loop() {
   server.handleClient();
@@ -257,13 +266,23 @@ void loop() {
   static int sinSensorCount = 0;
 
   if (pirActual && !movimientoPrevio) {
-    Serial.println("[LOG] Movimiento detectado, tomando foto...");
-    tomarFoto("PIR");
-    estadoMovimiento = true;
+    Serial.printf("[LOG] PIR HIGH detectado - Previo: %s\n", movimientoPrevio ? "true" : "false");  // Log debug
+    // Verificar si ha pasado suficiente tiempo desde la última foto
+    if (millis() - ultimoMovimientoMs > esperaEntreFotosMs) {
+      Serial.println("[LOG] Cooldown OK, tomando foto...");
+      if (tomarFoto("PIR")) {  // Solo setear true si éxito
+        estadoMovimiento = true;
+      } else {
+        Serial.println("[ERROR] tomarFoto falló, no setear estado");
+      }
+    } else {
+      Serial.println("[LOG] Movimiento detectado, pero cooldown activo.");
+      // No setear estadoMovimiento aquí, para evitar /photo sin fb nuevo
+    }
+    ultimoMovimientoMs = millis();
     sinMovimientoCount = 0;
     sinSensorCount = 0;
   } else if (!pirActual) {
-    estadoMovimiento = false;
     sinMovimientoCount++;
     if (sinMovimientoCount == 1000) {
       Serial.println("[INFO] No se detecta movimiento PIR.");
@@ -273,12 +292,23 @@ void loop() {
 
   if (pirActual == movimientoPrevio) {
     sinSensorCount++;
+    
     if (sinSensorCount == 5000) {
       Serial.println("[ADVERTENCIA] El sensor PIR podría no estar conectado o está fallando.");
       sinSensorCount = 0;
     }
   } else {
     sinSensorCount = 0;
+  }
+
+  // Timeout para estadoMovimiento: solo resetear si PIR está bajo y ha pasado el tiempo
+  if (!pirActual && estadoMovimiento && (millis() - ultimoMovimientoMs > timeoutMovimientoMs)) {
+    estadoMovimiento = false;
+    Serial.println("[LOG] Timeout de movimiento expirado.");
+    if (currentFb) {
+      esp_camera_fb_return(currentFb);
+      currentFb = NULL;
+    }
   }
 
   movimientoPrevio = pirActual;
