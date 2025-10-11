@@ -3,12 +3,10 @@
 #include <Arduino.h>                // Funciones básicas de Arduino
 #include "Arduino_GFX_Library.h"    // Librería para manejo de pantallas gráficas
 #include "pin_config.h"             // Definición de pines personalizados
-#include <Wire.h>                   // Comunicación I2C (no usada aquí, pero común en pantallas)
 #include "HWCDC.h"                  // Comunicación USB Serial
 #include <WiFi.h>                   // Conexión WiFi
 #include <HTTPClient.h>             // Cliente HTTP para peticiones a la cámara
-#include <TJpg_Decoder.h>           // Decodificador JPEG para imágenes
-#include <JPEGDEC.h>                // Decodificador JPEG alternativo
+#include <JPEGDEC.h>                // Decodificador JPEG para imágenes
 #include <ArduinoJson.h>            // Parseo de JSON para respuestas de la cámara
 
 // ======================= OBJETO SERIAL USB ==========================
@@ -18,6 +16,9 @@ HWCDC USBSerial; // Comunicación serial por USB para debug
 // Dimensiones de la pantalla LCD
 #define LCD_WIDTH 240
 #define LCD_HEIGHT 280
+
+// Agrega aquí la definición del pin vibrador
+#define PIN_VIBRADOR 18
 
 // Configuración del bus SPI para la pantalla
 Arduino_DataBus *bus = new Arduino_ESP32SPI(LCD_DC, LCD_CS, LCD_SCK, LCD_MOSI);
@@ -150,9 +151,9 @@ void mostrarPantallaAlertaPremium() {
   }
   dibujarPanelModerno(20, 60, 200, 100, FONDO_ALERTA, ACENTO_ALERTA);
   dibujarIconoAlerta(120, 110, 80, ACENTO_ALERTA);
-  mostrarTextoCentrado("DETECCIÓN", 35, 3, ACENTO_ALERTA);
-  mostrarTextoCentrado("MOVIMIENTO", 170, 2, TEXTO_PRINCIPAL);
-  mostrarTextoCentrado("ACTIVIDAD SUSPECTA DETECTADA", 190, 1, TEXTO_SECUNDARIO);
+  mostrarTextoCentrado("DETECCION", 40, 3, ACENTO_ALERTA); // y=40, sin tilde
+  mostrarTextoCentrado("DE MOVIMIENTO", 80, 2, TEXTO_PRINCIPAL); // y=80
+  mostrarTextoCentrado("ACTIVIDAD SOSPECHOSA DETECTADA", 130, 1, TEXTO_SECUNDARIO); // y=130
 }
 
 void mostrarPantallaError(const char *mensaje) {
@@ -164,8 +165,8 @@ void mostrarPantallaError(const char *mensaje) {
   gfx->setTextColor(TEXTO_PRINCIPAL);
   gfx->setCursor(113, 103);
   gfx->print("!");
-  mostrarTextoCentrado("ERROR", 45, 2, TEXTO_PRINCIPAL);
-  mostrarTextoCentrado(mensaje, 160, 1, TEXTO_SECUNDARIO);
+  mostrarTextoCentrado("ERROR", 45, 2, TEXTO_PRINCIPAL); // y=45
+  mostrarTextoCentrado(mensaje, 160, 1, TEXTO_SECUNDARIO); // y=160
 }
 
 void efectoAlertaModerno() {
@@ -175,7 +176,7 @@ void efectoAlertaModerno() {
       gfx->fillScreen(BACKGROUND);
       dibujarPanelModerno(20, 60, 200, 100, FONDO_ALERTA, colorPulso);
       dibujarIconoAlerta(120, 110, 80, colorPulso);
-      mostrarTextoCentrado("DETECCIÓN", 35, 3, colorPulso);
+      mostrarTextoCentrado("DETECCION", 40, 3, colorPulso); // sin tilde
       mostrarTextoCentrado("MOVIMIENTO", 170, 2, TEXTO_PRINCIPAL);
       delay(50);
     }
@@ -184,7 +185,7 @@ void efectoAlertaModerno() {
       gfx->fillScreen(BACKGROUND);
       dibujarPanelModerno(20, 60, 200, 100, FONDO_ALERTA, colorPulso);
       dibujarIconoAlerta(120, 110, 80, colorPulso);
-      mostrarTextoCentrado("DETECCIÓN", 35, 3, colorPulso);
+      mostrarTextoCentrado("DETECCION", 40, 3, colorPulso); // sin tilde
       mostrarTextoCentrado("MOVIMIENTO", 170, 2, TEXTO_PRINCIPAL);
       delay(50);
     }
@@ -193,14 +194,21 @@ void efectoAlertaModerno() {
 }
 
 void mostrarPantallaProcesando() {
-  gfx->fillScreen(BACKGROUND);
-  dibujarPanelModerno(30, 80, 180, 80, FONDO_CONECTADO, ACENTO_CONEXION);
+  // Solo dibuja el fondo y panel si realmente cambió de pantalla
+  static bool yaDibujado = false;
+  if (!yaDibujado) {
+    gfx->fillScreen(BACKGROUND);
+    dibujarPanelModerno(30, 80, 180, 80, FONDO_CONECTADO, ACENTO_CONEXION);
+    mostrarTextoCentrado("PROCESANDO", 100, 2, TEXTO_PRINCIPAL);
+    yaDibujado = true;
+  }
+  // Solo actualiza los puntos animados
   static int frame = 0;
   frame = (frame + 1) % 4;
-  mostrarTextoCentrado("PROCESANDO", 105, 2, TEXTO_PRINCIPAL);
+  gfx->fillRect(140, 130, 40, 20, BACKGROUND); // Limpia solo la zona de los puntos
   gfx->setTextSize(2);
   gfx->setTextColor(TEXTO_SECUNDARIO);
-  gfx->setCursor(140, 105);
+  gfx->setCursor(140, 130);
   for (int i = 0; i < frame; i++) {
     gfx->print(".");
   }
@@ -226,16 +234,27 @@ void mostrarBarraProgreso(int porcentaje, const char* texto = "CARGANDO") {
 }
 
 // -------------------- Callback JPEG --------------------
-bool jpgDrawToGfx(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t *bitmap) {
-  USBSerial.printf("JPEG bloque (%d,%d) %dx%d\n", x, y, w, h);
-  gfx->draw16bitRGBBitmap(x, y, bitmap, w, h);
-  return true;
+int jpegOffsetX = 0;
+int jpegOffsetY = 0;
+
+int jpegDrawCallback(JPEGDRAW *pDraw) {
+  // Dibuja la imagen tal cual, sin rotar
+  for (int y = 0; y < pDraw->iHeight; y++) {
+    for (int x = 0; x < pDraw->iWidth; x++) {
+      int drawX = jpegOffsetX + pDraw->x + x;
+      int drawY = jpegOffsetY + pDraw->y + y;
+      uint16_t color = ((uint16_t*)pDraw->pPixels)[y * pDraw->iWidth + x];
+      gfx->drawPixel(drawX, drawY, color);
+    }
+  }
+  return 1;
 }
 
 // -------------------- Chequear estado PIR via /status (nuevo, método GET) ---
 MovimientoStatus checkMovimiento() {
   mostrarPantallaProcesando();
-  mostrarTextoCentrado("CONSULTANDO SENSOR", 110, 2, TEXTO_SECUNDARIO);
+  gfx->fillRect(0, 140, LCD_WIDTH, 20, BACKGROUND); // Limpia solo la zona del texto secundario
+  mostrarTextoCentrado("CONSULTANDO SENSOR", 140, 2, TEXTO_SECUNDARIO); // y=140, debajo de "PROCESANDO"
   delay(5000);
 
   HTTPClient http;
@@ -270,11 +289,6 @@ MovimientoStatus checkMovimiento() {
 
 // -------------------- Descargar y mostrar imagen (modificado: sin trigger) --------------------
 JPEGDEC jpeg;
-
-int jpegDrawCallback(JPEGDRAW *pDraw) {
-  gfx->draw16bitRGBBitmap(pDraw->x, pDraw->y, (uint16_t*)pDraw->pPixels, pDraw->iWidth, pDraw->iHeight);
-  return 1;
-}
 
 void fetchAndShowImage() {
   USBSerial.println("=== Descargando imagen por movimiento ===");
@@ -328,31 +342,38 @@ void fetchAndShowImage() {
       mostrarBarraProgreso(100, "COMPLETADO");
       delay(500);
 
-      // --- Decodifica para obtener dimensiones ---
-      jpeg.openRAM(buf, idx, jpegDrawCallback);
-      int imgWidth = jpeg.getWidth();
-      int imgHeight = jpeg.getHeight();
-      jpeg.close();
+      // --- Fondo limpio ---
+      gfx->fillScreen(BACKGROUND);
 
-      // --- Escalado automático para que la imagen quepa en la pantalla ---
+      // --- Obtener dimensiones de la imagen JPEG ---
+      int imgWidth = 0, imgHeight = 0;
+      if (jpeg.openRAM(buf, idx, jpegDrawCallback)) {
+        imgWidth = jpeg.getWidth();
+        imgHeight = jpeg.getHeight();
+        jpeg.close();
+      } else {
+        USBSerial.println("No se pudo abrir el JPEG para obtener dimensiones");
+        mostrarPantallaError("JPEG inválido");
+        free(buf);
+        http.end();
+        return;
+      }
+
+      // --- Escalado proporcional para que la imagen quepa dentro de la pantalla ---
       int scale = 0;
-      while ((imgWidth >> scale) > LCD_WIDTH || (imgHeight >> scale) > LCD_HEIGHT) {
+      while ((imgWidth / (1 << (scale + 1))) >= LCD_WIDTH && (imgHeight / (1 << (scale + 1))) >= LCD_HEIGHT) {
         scale++;
       }
       int scaledWidth = imgWidth >> scale;
       int scaledHeight = imgHeight >> scale;
 
-      // Centrado en pantalla
-      int x = (LCD_WIDTH - scaledWidth) / 2;
-      int y = (LCD_HEIGHT - scaledHeight) / 2;
-      if (x < 0) x = 0;
-      if (y < 0) y = 0;
+      // --- Coordenadas para centrar la imagen ---
+      jpegOffsetX = (LCD_WIDTH - scaledWidth) / 2;
+      jpegOffsetY = (LCD_HEIGHT - scaledHeight) / 2;
 
-      // --- Dibuja la imagen centrada y ajustada ---
-      gfx->fillScreen(BACKGROUND);
-      dibujarPanelModerno(x-8, y-8, scaledWidth+16, scaledHeight+16, BORDE_SUAVE, ACENTO_CONEXION);
+      // --- Dibuja la imagen centrada ---
       jpeg.openRAM(buf, idx, jpegDrawCallback);
-      jpeg.decode(x, y, scale); // Aplica el escalado calculado
+      jpeg.decode(0, 0, scale);
       jpeg.close();
 
       mostrarTextoCentrado("CAPTURA COMPLETADA", 270, 1, TEXTO_SECUNDARIO);
@@ -377,10 +398,10 @@ void fetchAndShowImage() {
 void mostrarPantallaEsperaSinMovimiento() {
   gfx->fillScreen(BACKGROUND);
   dibujarPanelModerno(30, 80, 180, 80, FONDO_CONECTADO, ACENTO_CONEXION);
-  mostrarTextoCentrado("SIN MOVIMIENTO", 100, 2, TEXTO_SECUNDARIO);
-  mostrarTextoCentrado("Sensor PIR inactivo", 130, 1, TEXTO_SECUNDARIO);
+  mostrarTextoCentrado("SIN MOVIMIENTO", 100, 2, TEXTO_SECUNDARIO); // y=100
+  mostrarTextoCentrado("SENSOR PIR INACTIVO", 130, 1, TEXTO_SECUNDARIO); // y=130
   dibujarIconoConexion(120, 170, 40, gfx->color565(100, 100, 100));  // Icono gris para inactivo
-  mostrarTextoCentrado("Esperando detección...", 220, 1, TEXTO_SECUNDARIO);
+  mostrarTextoCentrado("ESPERANDO DETECCION...", 210, 1, TEXTO_SECUNDARIO); // y=210, sin tilde
 }
 
 // ======================= SETUP =======================
@@ -401,17 +422,17 @@ void setup() {
   pinMode(LCD_BL, OUTPUT);      // Pin de retroiluminación
   digitalWrite(LCD_BL, HIGH);   // Enciende la retroiluminación
 
-  // Configura el decodificador JPEG
-  TJpgDec.setJpgScale(1);
-  TJpgDec.setCallback(jpgDrawToGfx);
-  TJpgDec.setSwapBytes(true);
+  // Elimina o comenta estas líneas:
+  // TJpgDec.setJpgScale(1);
+  // TJpgDec.setCallback(jpgDrawToGfx);
+  // TJpgDec.setSwapBytes(true);
 
   // Pantalla de inicio
   gfx->fillScreen(BACKGROUND);
-  mostrarTextoCentrado("SISTEMA DE SEGURIDAD", 80, 2, ACENTO_CONEXION);
-  mostrarTextoCentrado("ESP32-CAM PRO", 110, 2, TEXTO_PRINCIPAL);
-  dibujarIconoConexion(120, 170, 80, ACENTO_CONEXION);
-  mostrarTextoCentrado("INICIANDO...", 220, 1, TEXTO_SECUNDARIO);
+  mostrarTextoCentrado("SISTEMA DE SEGURIDAD", 60, 2, ACENTO_CONEXION); // y=60
+  mostrarTextoCentrado("ESP32-CAM PRO", 90, 2, TEXTO_PRINCIPAL); // y=90
+  dibujarIconoConexion(120, 140, 80, ACENTO_CONEXION); // y=140
+  mostrarTextoCentrado("INICIANDO...", 230, 1, TEXTO_SECUNDARIO); // y=230
   delay(1500);
 
   // Conexión WiFi
@@ -427,7 +448,7 @@ void setup() {
     gfx->setTextSize(1);
     gfx->setTextColor(TEXTO_SECUNDARIO);
     gfx->setCursor(40, 200);
-    gfx->print("Conectando a la red");
+    gfx->print("CONECTANDO A LA RED..."); // Mayúsculas y puntos suspensivos
     for (int i = 0; i < (frame % 4); i++) {
       gfx->print(".");
     }
@@ -453,7 +474,7 @@ unsigned long lastCheckMs = 0;
 /**
  * Intervalo de tiempo (en milisegundos) entre chequeos de movimiento.
  */
-const unsigned long checkIntervalMs = 3000;  // Chequea cada 3s
+const unsigned long checkIntervalMs = 2000;  // Chequea cada 2s
 
 // ======================= LOOP PRINCIPAL =======================
 /**
@@ -499,6 +520,6 @@ void loop() {
 void mostrarPantallaEspera() {
   gfx->fillScreen(BACKGROUND);
   dibujarPanelModerno(30, 80, 180, 80, FONDO_CONECTADO, ACENTO_CONEXION);
-  mostrarTextoCentrado("ESPERANDO CONEXIÓN", 110, 2, TEXTO_SECUNDARIO);
+  mostrarTextoCentrado("ESPERANDO CONEXIÓN", 110, 2, TEXTO_SECUNDARIO); // y=110
   dibujarIconoConexion(120, 170, 60, ACENTO_CONEXION);
 }
