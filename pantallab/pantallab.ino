@@ -422,6 +422,10 @@ void setup() {
   pinMode(LCD_BL, OUTPUT);      // Pin de retroiluminación
   digitalWrite(LCD_BL, HIGH);   // Enciende la retroiluminación
 
+  // Inicializar salida para el vibrador (GPIO18)
+  pinMode(PIN_VIBRADOR, OUTPUT);
+  digitalWrite(PIN_VIBRADOR, LOW); // asegurar apagado al inicio
+
   // Elimina o comenta estas líneas:
   // TJpgDec.setJpgScale(1);
   // TJpgDec.setCallback(jpgDrawToGfx);
@@ -496,12 +500,20 @@ void loop() {
         USBSerial.println(">>> ¡MOVIMIENTO NUEVO! Mostrando foto...");
         ultimoMovimiento = true;
         ultimoFotoCounter = status.fotos; // Actualiza el contador de fotos
+
+        // Activa la señal en el pin 18 al detectar movimiento
+        digitalWrite(PIN_VIBRADOR, HIGH);
+
         efectoAlertaModerno();            // Muestra animación de alerta
         delay(1000);                      // Espera breve
         fetchAndShowImage();              // Descarga y muestra la imagen
+
+        // Apaga la señal en el pin 18 después de mostrar la imagen
+        digitalWrite(PIN_VIBRADOR, LOW);
       } else if (!status.movimiento) {
-        // Si no hay movimiento, muestra pantalla de espera
+        // Si no hay movimiento, muestra pantalla de espera y asegura salida LOW
         ultimoMovimiento = false;
+        digitalWrite(PIN_VIBRADOR, LOW);
         mostrarPantallaEsperaSinMovimiento();
       }
     }
